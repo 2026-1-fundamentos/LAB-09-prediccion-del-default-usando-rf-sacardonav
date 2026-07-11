@@ -92,151 +92,122 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
-"""
-Entrenamiento de un modelo de clasificación para predecir el default
-de pago de tarjetas de crédito.
-"""
-
-import gzip
-import json
-import pickle
-from pathlib import Path
-
 import pandas as pd
-
-from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import (
-    balanced_accuracy_score,
-    confusion_matrix,
-    f1_score,
-    precision_score,
-    recall_score,
-)
+import os
+import gzip
+import pickle
+import json
 from sklearn.model_selection import GridSearchCV
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import OneHotEncoder
+from sklearn.metrics import precision_score, balanced_accuracy_score, recall_score, f1_score, confusion_matrix
 
+def load_dataset(path: str) -> pd.DataFrame:
+    return pd.read_csv(path, index_col=False, compression="zip")
 
-train = pd.read_csv("files/input/train_data.csv.zip")
-test = pd.read_csv("files/input/test_data.csv.zip")
-
-
-def clean_data(df):
-    df = df.copy()
-
+def clean_dataset(df: pd.DataFrame) -> pd.DataFrame:
     df = df.rename(columns={"default payment next month": "default"})
-    df = df.drop(columns=["ID"])
+    if "ID" in df.columns:
+        df = df.drop(columns=["ID"])
+    # Limpieza necesaria para este dataset
+    df = df.loc[df["MARRIAGE"] != 0] 
+    df = df.loc[df["EDUCATION"] != 0] 
+    df["EDUCATION"] = df["EDUCATION"].apply(lambda x: x if x < 4 else 4)
+    return df
 
-    df = df[(df["EDUCATION"] != 0) & (df["MARRIAGE"] != 0)]
-    df.loc[df["EDUCATION"] > 4, "EDUCATION"] = 4
-
-    return df.dropna()
-
-
-train = clean_data(train)
-test = clean_data(test)
-
-x_train = train.drop(columns="default")
-y_train = train["default"]
-
-x_test = test.drop(columns="default")
-y_test = test["default"]
-
-categorical_columns = [
-    "SEX",
-    "EDUCATION",
-    "MARRIAGE",
-    "PAY_0",
-    "PAY_2",
-    "PAY_3",
-    "PAY_4",
-    "PAY_5",
-    "PAY_6",
-]
-
-preprocessor = ColumnTransformer(
-    transformers=[
-        (
-            "categorical",
-            OneHotEncoder(handle_unknown="ignore"),
-            categorical_columns,
-        )
-    ],
-    remainder="passthrough",
-)
-
-pipeline = Pipeline(
-    steps=[
-        ("preprocessor", preprocessor),
-        ("classifier", RandomForestClassifier(random_state=42)),
-    ]
-)
-
-param_grid = {
-    "classifier__n_estimators": [100, 200],
-    "classifier__max_depth": [None, 10, 20],
-    "classifier__min_samples_split": [2, 5],
-}
-
-grid_search = GridSearchCV(
-    estimator=pipeline,
-    param_grid=param_grid,
-    scoring="balanced_accuracy",
-    cv=10,
-    n_jobs=-1,
-)
-
-grid_search.fit(x_train, y_train)
-
-Path("files/models").mkdir(parents=True, exist_ok=True)
-
-with gzip.open("files/models/model.pkl.gz", "wb") as file:
-    pickle.dump(grid_search, file)
-
-metric_results = []
-cm_results = []
-
-for dataset, x, y in [
-    ("train", x_train, y_train),
-    ("test", x_test, y_test),
-]:
-
-    predictions = grid_search.predict(x)
-
-    metric_results.append(
-        {
-            "type": "metrics",
-            "dataset": dataset,
-            "precision": precision_score(y, predictions),
-            "balanced_accuracy": balanced_accuracy_score(y, predictions),
-            "recall": recall_score(y, predictions),
-            "f1_score": f1_score(y, predictions),
-        }
+def create_pipeline() -> Pipeline:
+    cat_features = ["SEX", "EDUCATION", "MARRIAGE"]
+    preprocessor = ColumnTransformer(
+        transformers=[("cat", OneHotEncoder(handle_unknown="ignore"), cat_features)],
+        remainder="passthrough",
+    )
+    return Pipeline(
+        steps=[
+            ("preprocessor", preprocessor),
+            ("classifier", RandomForestClassifier(random_state=42)),
+        ]
     )
 
-    cm = confusion_matrix(y, predictions)
+def create_estimator(pipeline: Pipeline) -> GridSearchCV:
 
-    cm_results.append(
-        {
-            "type": "cm_matrix",
-            "dataset": dataset,
-            "true_0": {
-                "predicted_0": int(cm[0, 0]),
-                "predicted_1": int(cm[0, 1]),
-            },
-            "true_1": {
-                "predicted_0": int(cm[1, 0]),
-                "predicted_1": int(cm[1, 1]),
-            },
-        }
+    param_grid = {
+        "classifier__n_estimators": [150],
+        "classifier__max_depth": [None],
+        "classifier__min_samples_leaf": [1, 2]
+    }
+
+    return GridSearchCV(
+        pipeline,
+        param_grid,
+        cv=5, 
+        scoring="balanced_accuracy",
+        n_jobs=-1,
+        refit=True,
     )
 
-results = metric_results + cm_results
+def save_model(path: str, estimator: GridSearchCV):
+    os.makedirs(os.path.dirname(path), exist_ok=True) 
+    with gzip.open(path, "wb") as f:
+        pickle.dump(estimator, f)
 
-Path("files/output").mkdir(parents=True, exist_ok=True)
+def calculate_precision_metrics(dataset_name: str, y_true, y_pred) -> dict:
+    return {
+        "type": "metrics",
+        "dataset": dataset_name,
+        "precision": float(precision_score(y_true, y_pred, zero_division=0)),
+        "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
+        "recall": float(recall_score(y_true, y_pred, zero_division=0)),
+        "f1_score": float(f1_score(y_true, y_pred, zero_division=0)),
+    }
 
-with open("files/output/metrics.json", "w", encoding="utf-8") as file:
-    for item in results:
-        file.write(json.dumps(item))
-        file.write("\n")
+def calculate_confusion_metrics(dataset_name: str, y_true, y_pred) -> dict:
+    cm = confusion_matrix(y_true, y_pred)
+    return {
+        "type": "cm_matrix",
+        "dataset": dataset_name,
+        "true_0": {"predicted_0": int(cm[0][0]), "predicted_1": int(cm[0][1])},
+        "true_1": {"predicted_0": int(cm[1][0]), "predicted_1": int(cm[1][1])},
+    }
+
+def main():
+    input_files_path = "files/input/"
+    models_files_path = "files/models/"
+    output_files_path = "files/output/"
+
+    test_df = load_dataset(os.path.join(input_files_path, "test_data.csv.zip"))
+    train_df = load_dataset(os.path.join(input_files_path, "train_data.csv.zip"))
+
+    test_df = clean_dataset(test_df)
+    train_df = clean_dataset(train_df)
+
+    x_test = test_df.drop(columns=["default"])
+    y_test = test_df["default"]
+
+    x_train = train_df.drop(columns=["default"])
+    y_train = train_df["default"]
+
+    pipeline = create_pipeline()
+    estimator = create_estimator(pipeline)
+    estimator.fit(x_train, y_train)
+
+    save_model(os.path.join(models_files_path, "model.pkl.gz"), estimator)
+
+    y_test_pred = estimator.predict(x_test)
+    test_precision_metrics = calculate_precision_metrics("test", y_test, y_test_pred)
+    y_train_pred = estimator.predict(x_train)
+    train_precision_metrics = calculate_precision_metrics("train", y_train, y_train_pred)
+
+    test_confusion_metrics = calculate_confusion_metrics("test", y_test, y_test_pred)
+    train_confusion_metrics = calculate_confusion_metrics("train", y_train, y_train_pred)
+
+    os.makedirs(output_files_path, exist_ok=True)
+    with open(os.path.join(output_files_path, "metrics.json"), "w") as file:
+        file.write(json.dumps(train_precision_metrics) + "\n")
+        file.write(json.dumps(test_precision_metrics) + "\n")
+        file.write(json.dumps(train_confusion_metrics) + "\n")
+        file.write(json.dumps(test_confusion_metrics) + "\n")
+
+if __name__ == "__main__":
+    main()
